@@ -1,0 +1,9 @@
+age,monthly_spend,tenure_months,contract_type,support_calls,churn
+25,99.5,3,monthly,2,1
+42,210.0,24,annual,0,0
+31,120.0,8,monthly,3,1
+54,300.0,36,annual,1,0
+29,89.0,2,monthly,4,1
+47,180.0,18,annual,1,0
+38,150.0,12,monthly,2,0
+60,340.0,48,annual,0,0
