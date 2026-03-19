@@ -119,6 +119,17 @@ except ImportError:
                 return False
             return True
         
+        def check_billing_access(self, tenant_id, feature: str) -> bool:
+            """Check billing access."""
+            if not tenant_id:
+                return False
+            try:
+                from infrastructure.billing.stripe_service import get_billing_manager
+                manager = get_billing_manager()
+                return manager.check_feature_access(tenant_id, feature)
+            except Exception:
+                return False
+        
         def apply(self, request: PredictionRequest, result: PredictionResult) -> PredictionResult:
             return result
         

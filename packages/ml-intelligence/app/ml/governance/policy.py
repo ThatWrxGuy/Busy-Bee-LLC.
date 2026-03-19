@@ -14,11 +14,11 @@ class PlanUpgradeRequired(Exception):
 
 
 class MLGovernancePolicy:
-    """Governance policy that branches by execution mode and plan tier.
+    """Governance policy that branches by execution mode, plan tier, and billing.
     
     Finance always requires human review.
     SaaS mode enforces stricter policies than personal mode.
-    Plan tiers limit capabilities.
+    Plan tiers limit capabilities based on subscription.
     """
     
     # Capability matrix
@@ -69,6 +69,32 @@ class MLGovernancePolicy:
         
         return True
     
+    def check_billing_access(
+        self,
+        tenant_id: str | None,
+        feature: str
+    ) -> bool:
+        """Check if tenant has billing access for feature.
+        
+        Args:
+            tenant_id: Tenant ID to check
+            feature: Feature name
+            
+        Returns:
+            True if billing allows access
+        """
+        if not tenant_id:
+            # No tenant = free tier
+            return False
+        
+        try:
+            from infrastructure.billing.stripe_service import get_billing_manager
+            manager = get_billing_manager()
+            return manager.check_feature_access(tenant_id, feature)
+        except Exception:
+            # If billing service unavailable, default to strict
+            return False
+    
     def apply(
         self,
         request: PredictionRequest,
@@ -93,6 +119,15 @@ class MLGovernancePolicy:
             if context.plan_tier == "enterprise":
                 # Enterprise may have conditional approval
                 result.metadata["enterprise_approval"] = "conditional"
+            
+            # Check billing status for capabilities
+            if context.tenant_id:
+                billing_ok = self.check_billing_access(
+                    context.tenant_id,
+                    f"{request.source_domains[0]}:read" if request.source_domains else ""
+                )
+                if not billing_ok:
+                    result.metadata["billing_required"] = True
             
             # Check capabilities
             for domain in request.source_domains:
