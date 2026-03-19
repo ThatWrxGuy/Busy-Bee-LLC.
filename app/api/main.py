@@ -14,6 +14,7 @@ All endpoints return product DTOs only.
 
 from fastapi import FastAPI, HTTPException
 from fastapi.routing import APIRouter
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
@@ -40,6 +41,20 @@ app = FastAPI(
     version="0.3.0",
     description="Executive Intelligence Platform - BB-ARCH-PROD-001 Compliant"
 )
+
+# Add CORS middleware for LOIS frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://lois-life-operating-intelligence-s-c8a842a9.base44.app",
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 policy = load_default_policy()
 engine = GovernanceEngine(policy=policy, cap_table=default_cap_table())
 brief_service = ExecutiveBriefService()

@@ -1,0 +1,12 @@
+# Busy Bee Holdings LLC - API Dependencies
+
+# Core
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+
+# For async operations
+aiohttp>=3.8.0
+
+# Optional: for production deployment
+gunicorn>=20.1.0
