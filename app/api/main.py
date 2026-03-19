@@ -335,3 +335,7 @@ def evaluate_decision(payload: DecisionRequest) -> DecisionResponse:
 # Mount /v2 endpoints from the imported Busy Bee V2 app.
 v2_app = create_v2_app()
 app.mount("/v2", v2_app)
+
+# Include chat API
+from app.api.chat import router as chat_router
+app.include_router(chat_router)
