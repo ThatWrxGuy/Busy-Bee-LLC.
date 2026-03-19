@@ -1,9 +1,9 @@
 # Copyright (c) Busy Bee Holdings LLC
 # All Rights Reserved
 
-"""SaaS Tenant Context Middleware with JWT enforcement.
+"""SaaS Tenant Context Middleware with JWT and External Auth.
 
-This middleware enforces tenant scoping and validates JWT tokens.
+This middleware enforces tenant scoping and validates JWT/Auth tokens.
 """
 
 from __future__ import annotations
@@ -20,6 +20,12 @@ from infrastructure.auth.jwt_service import (
     JWTMissingClaimError,
     get_jwt_service,
 )
+from infrastructure.auth.provider_adapter import (
+    AuthError,
+    TokenInvalidError,
+    TokenExpiredError as AuthTokenExpiredError,
+    get_auth_provider,
+)
 
 
 class UnauthorizedError(Exception):
@@ -30,7 +36,7 @@ class UnauthorizedError(Exception):
 class TenantContextMiddleware(BaseHTTPMiddleware):
     """Middleware to inject TenantContext into SaaS requests.
     
-    Validates JWT token and enforces tenant scope.
+    Supports both internal JWT and external auth providers (Clerk, Auth0).
     """
     
     # Paths that don't require authentication
@@ -41,7 +47,7 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
         if request.url.path in self.PUBLIC_PATHS:
             return await call_next(request)
         
-        # Extract JWT from Authorization header
+        # Extract token from Authorization header
         auth_header = request.headers.get("Authorization", "")
         
         if not auth_header.startswith("Bearer "):
@@ -52,37 +58,16 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
         
         token = auth_header[7:]  # Remove "Bearer "
         
-        # Verify JWT
-        try:
-            service = get_jwt_service()
-            payload = service.verify_token(token)
-        except JWTExpiredError:
-            return JSONResponse(
-                {"detail": "Token has expired", "code": "TOKEN_EXPIRED"},
-                status_code=401
-            )
-        except JWTInvalidSignatureError:
-            return JSONResponse(
-                {"detail": "Invalid token signature", "code": "INVALID_TOKEN"},
-                status_code=401
-            )
-        except JWTMissingClaimError as e:
-            return JSONResponse(
-                {"detail": str(e), "code": "MISSING_CLAIM"},
-                status_code=401
-            )
-        except JWTError as e:
-            return JSONResponse(
-                {"detail": f"Token validation failed: {e}", "code": "TOKEN_INVALID"},
-                status_code=401
-            )
+        # Try external auth provider first (Clerk, Auth0, etc.)
+        context = await self._authenticate_external(token)
         
-        # Create TenantContext from JWT
-        try:
-            context = TenantContext.from_jwt_payload(payload)
-        except ValueError as e:
+        # If no external provider, try internal JWT
+        if context is None:
+            context = await self._authenticate_internal(token)
+        
+        if context is None:
             return JSONResponse(
-                {"detail": str(e), "code": "INVALID_CONTEXT"},
+                {"detail": "Authentication failed", "code": "AUTH_FAILED"},
                 status_code=401
             )
         
@@ -106,6 +91,47 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
             response.headers["X-Tenant-Id"] = context.tenant_id
         
         return response
+    
+    async def _authenticate_external(self, token: str) -> TenantContext | None:
+        """Try external auth provider."""
+        try:
+            provider = get_auth_provider()
+            
+            # Skip if NoopAuthProvider (dev mode)
+            if provider.__class__.__name__ == "NoopAuthProvider":
+                return None
+            
+            user = provider.extract_user_from_token(token)
+            
+            # Get plan from billing (would integrate with Stripe in production)
+            plan_tier = "free"  # Default
+            
+            return TenantContext.from_jwt_payload(
+                type('Payload', (), {
+                    'subject': user.user_id,
+                    'tenant_id': f"tenant_{user.user_id}",
+                    'mode': 'saas',
+                    'plan': plan_tier,
+                    'permissions': [],
+                    'issued_at': 0,
+                    'expires_at': 9999999999
+                })()
+            )
+        except (AuthError, TokenInvalidError, AuthTokenExpiredError):
+            return None
+        except Exception:
+            return None
+    
+    async def _authenticate_internal(self, token: str) -> TenantContext | None:
+        """Try internal JWT authentication."""
+        try:
+            service = get_jwt_service()
+            payload = service.verify_token(token)
+            
+            # Create TenantContext from JWT
+            return TenantContext.from_jwt_payload(payload)
+        except (JWTError, JWTExpiredError, JWTInvalidSignatureError, JWTMissingClaimError, ValueError):
+            return None
     
     def _resolve_plan_tier(self, request: Request) -> str:
         """Resolve plan tier from headers or default."""
