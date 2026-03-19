@@ -1,9 +1,9 @@
 # Copyright (c) Busy Bee Holdings LLC
 # All Rights Reserved
 
-"""SaaS Tenant Context Middleware.
+"""SaaS Tenant Context Middleware with JWT enforcement.
 
-This middleware enforces tenant scoping for all SaaS requests.
+This middleware enforces tenant scoping and validates JWT tokens.
 """
 
 from __future__ import annotations
@@ -13,52 +13,87 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from busybee_contracts.tenant_context import TenantContext
+from infrastructure.auth.jwt_service import (
+    JWTError,
+    JWTExpiredError,
+    JWTInvalidSignatureError,
+    JWTMissingClaimError,
+    get_jwt_service,
+)
+
+
+class UnauthorizedError(Exception):
+    """Raised when authentication fails."""
+    pass
 
 
 class TenantContextMiddleware(BaseHTTPMiddleware):
     """Middleware to inject TenantContext into SaaS requests.
     
-    Currently uses header-based resolution (bootstrap path).
-    Later, replace with signed auth claims.
+    Validates JWT token and enforces tenant scope.
     """
     
+    # Paths that don't require authentication
+    PUBLIC_PATHS = {"/health", "/ready", "/", "/docs", "/openapi.json"}
+    
     async def dispatch(self, request: Request, call_next):
-        # Extract tenant/user from headers (bootstrap path)
-        tenant_id = request.headers.get("X-Tenant-Id")
-        user_id = request.headers.get("X-User-Id")
+        # Check if path is public
+        if request.url.path in self.PUBLIC_PATHS:
+            return await call_next(request)
         
-        # Also check query params for flexibility
-        if not tenant_id:
-            tenant_id = request.query_params.get("tenant_id")
-        if not user_id:
-            user_id = request.query_params.get("user_id")
+        # Extract JWT from Authorization header
+        auth_header = request.headers.get("Authorization", "")
         
-        # Check for authorization header (future: JWT)
-        auth_header = request.headers.get("Authorization")
+        if not auth_header.startswith("Bearer "):
+            return JSONResponse(
+                {"detail": "Missing or invalid Authorization header", "code": "UNAUTHORIZED"},
+                status_code=401
+            )
         
-        # Create context
-        context = TenantContext(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            mode="saas",
-            permissions=frozenset(),  # Resolved from auth in production
-            plan_tier=self._resolve_plan_tier(request),
-            metadata={
-                "auth_type": "bearer" if auth_header else "header",
-                "path": request.url.path,
-            }
-        )
+        token = auth_header[7:]  # Remove "Bearer "
         
-        # Validate required scope
-        if request.url.path not in ["/health", "/ready", "/"]:
-            try:
-                context.require_tenant()
-                context.require_user()
-            except ValueError as exc:
-                return JSONResponse(
-                    {"detail": str(exc), "code": "TENANT_SCOPE_REQUIRED"},
-                    status_code=401
-                )
+        # Verify JWT
+        try:
+            service = get_jwt_service()
+            payload = service.verify_token(token)
+        except JWTExpiredError:
+            return JSONResponse(
+                {"detail": "Token has expired", "code": "TOKEN_EXPIRED"},
+                status_code=401
+            )
+        except JWTInvalidSignatureError:
+            return JSONResponse(
+                {"detail": "Invalid token signature", "code": "INVALID_TOKEN"},
+                status_code=401
+            )
+        except JWTMissingClaimError as e:
+            return JSONResponse(
+                {"detail": str(e), "code": "MISSING_CLAIM"},
+                status_code=401
+            )
+        except JWTError as e:
+            return JSONResponse(
+                {"detail": f"Token validation failed: {e}", "code": "TOKEN_INVALID"},
+                status_code=401
+            )
+        
+        # Create TenantContext from JWT
+        try:
+            context = TenantContext.from_jwt_payload(payload)
+        except ValueError as e:
+            return JSONResponse(
+                {"detail": str(e), "code": "INVALID_CONTEXT"},
+                status_code=401
+            )
+        
+        # Validate required scope for SaaS
+        try:
+            context.require_scope()
+        except ValueError as e:
+            return JSONResponse(
+                {"detail": str(e), "code": "TENANT_SCOPE_REQUIRED"},
+                status_code=401
+            )
         
         # Attach to request state
         request.state.tenant_context = context
@@ -67,8 +102,8 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         
         # Add tenant header to response for debugging
-        if tenant_id:
-            response.headers["X-Tenant-Id"] = tenant_id
+        if context.tenant_id:
+            response.headers["X-Tenant-Id"] = context.tenant_id
         
         return response
     

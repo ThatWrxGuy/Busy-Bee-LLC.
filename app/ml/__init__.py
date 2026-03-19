@@ -94,9 +94,30 @@ except ImportError:
         def has(self, task_name: str) -> bool:
             return task_name in self._models
 
+    class PlanUpgradeRequired(Exception):
+        """Raised when action requires plan upgrade."""
+        pass
+
     class MLGovernancePolicy:
         def __init__(self, min_confidence: float = 0.60) -> None:
             self.min_confidence = min_confidence
+        
+        # Capability matrix
+        CAPABILITY_MATRIX = {
+            "free": {"finance": ["read"], "health": ["read"], "career": ["read"]},
+            "pro": {"finance": ["read", "simulate"], "health": ["read", "track"], "career": ["read", "plan"]},
+            "enterprise": {"finance": ["read", "simulate", "execute"], "health": ["read", "track", "execute"], "career": ["read", "plan", "execute"]},
+        }
+        
+        def check_capability(self, domain: str, action: str, context) -> bool:
+            """Check if context has capability."""
+            plan = context.plan_tier if context else "free"
+            allowed = self.CAPABILITY_MATRIX.get(plan, {}).get(domain.lower(), [])
+            if action not in allowed:
+                if plan == "free":
+                    raise PlanUpgradeRequired(f"{domain} {action} requires Pro")
+                return False
+            return True
         
         def apply(self, request: PredictionRequest, result: PredictionResult) -> PredictionResult:
             return result

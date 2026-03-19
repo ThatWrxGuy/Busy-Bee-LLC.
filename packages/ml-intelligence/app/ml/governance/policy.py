@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from busybee_contracts.tenant_context import TenantContext
@@ -8,15 +8,66 @@ if TYPE_CHECKING:
 from app.ml.common.contracts import PredictionRequest, PredictionResult
 
 
+class PlanUpgradeRequired(Exception):
+    """Raised when action requires plan upgrade."""
+    pass
+
+
 class MLGovernancePolicy:
-    """Governance policy that branches by execution mode.
+    """Governance policy that branches by execution mode and plan tier.
     
     Finance always requires human review.
     SaaS mode enforces stricter policies than personal mode.
+    Plan tiers limit capabilities.
     """
+    
+    # Capability matrix
+    CAPABILITY_MATRIX = {
+        "free": {
+            "finance": ["read"],      # Read-only insights
+            "health": ["read"],
+            "career": ["read"],
+        },
+        "pro": {
+            "finance": ["read", "simulate"],  # Can run simulations
+            "health": ["read", "track"],
+            "career": ["read", "plan"],
+        },
+        "enterprise": {
+            "finance": ["read", "simulate", "execute"],  # Full execution
+            "health": ["read", "track", "execute"],
+            "career": ["read", "plan", "execute"],
+        },
+    }
     
     def __init__(self, min_confidence: float = 0.60) -> None:
         self.min_confidence = min_confidence
+    
+    def check_capability(
+        self,
+        domain: str,
+        action: str,
+        context: "TenantContext | None"
+    ) -> bool:
+        """Check if context has capability for domain/action.
+        
+        Raises:
+            PlanUpgradeRequired: If action requires upgrade
+        """
+        plan = context.plan_tier if context else "free"
+        domain_lower = domain.lower()
+        
+        # Get allowed actions for plan
+        allowed = self.CAPABILITY_MATRIX.get(plan, {}).get(domain_lower, [])
+        
+        if action not in allowed:
+            if plan == "free":
+                raise PlanUpgradeRequired(
+                    f"{domain.capitalize()} {action} requires Pro plan or higher"
+                )
+            return False
+        
+        return True
     
     def apply(
         self,
@@ -42,6 +93,13 @@ class MLGovernancePolicy:
             if context.plan_tier == "enterprise":
                 # Enterprise may have conditional approval
                 result.metadata["enterprise_approval"] = "conditional"
+            
+            # Check capabilities
+            for domain in request.source_domains:
+                try:
+                    self.check_capability(domain, "read", context)
+                except PlanUpgradeRequired as e:
+                    result.metadata["upgrade_required"] = str(e)
         
         # Confidence threshold - downgrade to advisory if too low
         if result.confidence < self.min_confidence:
